@@ -3,6 +3,12 @@ import tensorflow as tf
 
 import constants
 
+def input_generator():
+    """
+    TODO Write an input generator
+    :return:
+    """
+
 glue_train = bert_encode(glue['train'], tokenizer)
 glue_train_labels = glue['train']['label']
 
@@ -11,12 +17,6 @@ glue_validation_labels = glue['validation']['label']
 
 glue_test = bert_encode(glue['test'], tokenizer)
 glue_test_labels  = glue['test']['label']
-
-
-
-
-
-
 
 train_data_size = len(glue_train_labels)
 steps_per_epoch = int(train_data_size / constants.BATCH_SIZE)
