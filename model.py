@@ -59,7 +59,7 @@ def multiword_model(bert_config,
     pooled_out = tf.keras.layers.Dense(1, kernel_initializer=initializer, name="output_num_words")(
         pooled_out)  # indicate the number of words to generate
 
-    seq_out = tf.keras.layers.Flatten()(seq_out) # TODO find out how I can dynically slice this to the row that relates to the [MASK] token
+    seq_out = tf.keras.layers.Flatten()(seq_out) # TODO find out how I can dynamically slice this to the row that relates to the [MASK] token
     seq_out = tf.keras.layers.Dropout(bert_config.hidden_dropout_prob)(
         seq_out)  # TODO should this be the same dropout prob?
     seq_out = tf.keras.layers.Dense(bert_config.hidden_size,kernel_initializer=initializer)(seq_out) # TODO smaller intermediate layer for less weights, how much can and should I increase this?
