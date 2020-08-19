@@ -1,50 +1,66 @@
-import os
-import math
+import cProfile
 import logging
+import math
+import os
 import random
-from dataclasses import dataclass, field
-from typing import List
-from itertools import chain
+import sys
 from collections import OrderedDict
+from dataclasses import dataclass, field
+from itertools import chain
+from typing import List
 
 import fire
 import numpy as np
 import tensorflow as tf
 from official.nlp import bert
-import official.nlp.bert.tokenization
+from official.nlp.bert import tokenization
 
 # local imports
 import constants
+
+DEBUG = True
+PROFILING = True
 
 
 @dataclass
 class TrainingInstance:
     """Used for saving and loading from a file
 
-    Distance_ids mark how far the words are away from the [MASK] token and can be used for embeddings.
+    Distance_ids mark how far the words are away from the [GAP] token and can be used for embeddings.
+    Max_seq_length should be an even number.
+    [CLS] will be the first token and [GAP] will be in position
+    (max_seq_length - 1) // 2
     """
     tokens: List[str]
     distance_ids: List[int]
-    mask_token_pos: int
-    masked_tokens: List[int] = None
-    num_masked_tokens: int = field(init=False)
+    gapped_tokens: List[str] = None
+    num_gapped_tokens: int = field(init=False)
 
     def __post_init__(self):
-        assert '[MASK]' in self.tokens
+        assert '[GAP]' in self.tokens
 
-        if self.masked_tokens is None:
-            self.masked_tokens = []
-        self.num_masked_tokens = len(self.masked_tokens)
+        if self.gapped_tokens is None:
+            self.gapped_tokens = []
+        self.num_gapped_tokens = len(self.gapped_tokens)
 
     def __str__(self):
-        tokens = self.tokens
-        return " ".join(tokens)[:-1]
+        str = " ".join(self.tokens)
+        str += f"\nGapped tokens = {self.gapped_tokens}"
+        return str
+
+    def token_ids(self, tokenizer):
+        return tokenizer.convert_tokens_to_ids(self.tokens)
+
+    def pretty_print(self, tokenizer):
+        print(str(self), end="")
+        print(f"Token Ids = {self.token_ids(tokenizer)}")
+        print(f"Distance Ids = {self.distance_ids}")
 
 
-def create_training_instances(document_files,
+def create_training_instances(input_dir,
                               tokenizer,
                               max_seq_length,
-                              max_masked_tokens,
+                              max_gapped_tokens,
                               dupe_factor,
                               rng):
     """
@@ -54,151 +70,181 @@ def create_training_instances(document_files,
     """
     all_documents = []
 
-    for file in document_files:
-        with open(file, "r") as reader:
+    for file in os.listdir(input_dir):
+        with open(os.path.join(input_dir, file), "r+") as reader:
             all_documents.append([])
             for line in reader.readlines():
+                line = tokenization.convert_to_unicode(line)
                 line = line.strip()
 
                 if not line:
                     continue
 
-                tokens = tokenizer(line)
+                tokens = tokenizer.tokenize(line)
                 all_documents[-1].append(tokens)
     all_documents = [x for x in all_documents if x]
     rng.shuffle(all_documents)
 
     instances = []
     for _ in range(dupe_factor):
-        for i, doc in all_documents:
+        for i, doc in enumerate(all_documents):
             instances.extend(
                 create_instances_from_document(
-                    all_documents[i], tokenizer,
-                    max_seq_length, max_masked_tokens, rng))
+                    all_documents[i], max_seq_length,
+                    max_gapped_tokens, rng))
 
     rng.shuffle(instances)
     return instances
 
 
-def random_num_masked_tokens(rng, max_masked_tokens):
-    if rng.random() < 0.05:
-        return 0
-    else:
-        return rng.randint(1, max_masked_tokens)
-
-
 def create_instances_from_document(document,
-                                   tokenizer,
                                    max_seq_length,
-                                   max_masked_tokens,
+                                   max_gapped_tokens,
                                    rng,
                                    long_seq_prob=0.95,
                                    geo_dist_p_value=0.1):
-    """Creates `TrainingInstance`s for a single document."""
+    """Creates `TrainingInstance`s for a single document.
+
+        The [CLS] output will predict len(gapped_tokens). The gap
+        token will be put in max_seq_length // 2, which is the middle
+        because the leftmost slot will have the [CLS] token. [GAP] replaces
+        the gapped tokens in the output.
+        To make the model more robust to changing sequence lengths,
+        the context to the left and right will vary in length.
+        Words will be substracted on both sides. In long_seq_prob amount
+        of times this number will be drawn from a geometric distribution.
+        For the rest of the the length will be uniformly distributed between
+        2 and 0.1 * max_seq_length.
+    """
+
+    def random_num_gapped_tokens():
+        nonlocal rng
+        nonlocal max_gapped_tokens
+        if rng.random() < 0.05:
+            return 0
+        else:
+            return rng.randint(1, max_gapped_tokens)
+
+    logging.debug("Started creating instances for document.")
+
     num_sentences = len(document)
-    document = list(chain(document))
+    document = list(chain(*document))
     num_tokens = len(document)
 
-    # num_masked_tokens is ground-truth for the [CLS] output to predict
-    num_masked_tokens = random_num_masked_tokens(rng, max_masked_tokens)
-
-    # The mask token will be put in max_seq_length // 2, which is the middle
-    # because the leftmost slot will have the [CLS] token.
-
-    # [MASK] replaces num_masked_tokens
-    max_num_tokens = max_seq_length - num_masked_tokens + 1
-
-    # To make the model more robust to changing sequence lengths,
-    # the context to the left and right will vary in length.
-    # Words will be substracted on both sides. In long_seq_prob amount
-    # of times this number will be drawn from a geometric distribution.
-    # For the rest of the the length will be uniformly distributed between
-    # 2 and 0.1 * max_seq_length
     max_left_right_context = (max_seq_length - 1) // 2
-    if rng.random() < long_seq_prob:
-        sub_words = np.random.geometric(geo_dist_p_value)
-        num_left_right_context = max_left_right_context - sub_words
-    else:
-        num_left_right_context = rng.randint(2, 0.1 * (max_seq_length - 2))
-
-    i = num_left_right_context + math.ceil(num_masked_tokens / 2)
-    max_index = len(document) - num_left_right_context - math.ceil(num_masked_tokens / 2)
-    create_inst_prob = 3 * num_sentences / num_tokens
+    i = max_left_right_context + math.ceil(max_gapped_tokens / 2)
+    max_index = len(document) - max_left_right_context - math.ceil(max_gapped_tokens / 2)
+    create_inst_prob = num_sentences / num_tokens  # creates approximately num_sentences instances per duplication
     instances = []
 
     while i < max_index:
         if rng.random() < create_inst_prob:
-            tokens = [""] * max_seq_length
-            token_ids = [0] * max_seq_length
+            logging.debug(f"Creating training instance at index {i}.")
+
+            tokens = ['[PAD]'] * max_seq_length
             distance_ids = [0] * max_seq_length
 
-            masked_token_shift = num_masked_tokens // 2
-
-            # TODO this needs to be fixed for subword models, so that only whole words are masked
-            if num_masked_tokens == 0:
-                left_context = document[i - num_left_right_context: i]
-                right_context = document[i: i + num_left_right_context]
-                masked_tokens = []
+            if rng.random() < long_seq_prob:
+                sub_words = np.random.geometric(geo_dist_p_value)
+                num_left_right_context = max_left_right_context - sub_words
             else:
-                is_even = num_masked_tokens % 2
-                if is_even:
-                    left_context = document[i - num_left_right_context - masked_token_shift: i - masked_token_shift]
-                    right_context = document[i + masked_token_shift: i + masked_token_shift + num_left_right_context]
-                    masked_tokens = document[i - masked_token_shift: i + masked_token_shift]
-                else:
-                    # in this case take the odd token is taken from the left side
-                    left_context = document[
-                                   i - num_left_right_context - masked_token_shift - 1: i - masked_token_shift - 1]
-                    right_context = document[i + masked_token_shift: i + masked_token_shift + num_left_right_context]
-                    masked_tokens = document[i - masked_token_shift - 1: i + masked_token_shift]
+                num_left_right_context = rng.randint(2, (max_seq_length - 2) // 10)
 
+            desired_num_gapped_tokens = random_num_gapped_tokens()
+            gapped_tokens, left_context, right_context = gap_tokens(document,
+                                                                    desired_num_gapped_tokens,
+                                                                    i,
+                                                                    num_left_right_context)
+            logging.debug("Finished gapping tokens.")
             tokens[0] = "[CLS]"
-            token_ids[0] = tokenizer.convert_tokens_to_ids(["[CLS]"])[0]
 
-            tokens[max_left_right_context + 1] = "[MASK]"
-            token_ids[0] = tokenizer.convert_tokens_to_ids(["[CLS]"])[0]
+            gap_pos = max_left_right_context + 1
+            assert gap_pos == 128
+            tokens[gap_pos] = "[GAP]"
 
             dist_ascending = range(1, num_left_right_context + 1)
+            len_left_context = len(left_context)
+            len_right_context = len(right_context)
 
-            start_index = max_left_right_context + 1 - num_left_right_context
-            end_index = max_left_right_context + 1
-            tokens[start_index: end_index] = left_context
-            token_ids[start_index: end_index] = tokenizer.convert_tokens_to_ids(left_context)
-            distance_ids[start_index: end_index] = reversed(dist_ascending)
+            tokens[gap_pos - len_left_context: gap_pos] = left_context
+            distance_ids[gap_pos - len_left_context: gap_pos] = list(reversed(dist_ascending))[-len_left_context:]
 
-            start_index = max_left_right_context + 2
-            end_index = max_left_right_context + 2 + num_left_right_context
-            tokens[start_index: end_index] = right_context
-            token_ids[start_index: end_index] = tokenizer.convert_tokens_to_ids(right_context)
-            distance_ids[start_index: end_index] = list(dist_ascending)
+            post_gap = gap_pos + 1
+            tokens[post_gap: post_gap + len_right_context] = right_context
+            distance_ids[post_gap: post_gap + len_right_context] = list(dist_ascending)[0: len_right_context]
+
+            assert distance_ids[gap_pos] == 0
+            assert distance_ids[gap_pos + 1] == 1
+            assert distance_ids[gap_pos - 1] == 1
 
             instance = TrainingInstance(
                 tokens=tokens,
                 distance_ids=distance_ids,
-                mask_token_pos=max_seq_length // 2,
-                masked_tokens=masked_tokens)
+                gapped_tokens=gapped_tokens)
+
             instances.append(instance)
+            logging.debug("Finished creating Instance.")
         i += 1
 
     return instances
 
 
-def create_ordered_vocab_vec(masked_tokens, tokenizer):
-    res = [0] * tokenizer.vocab
-    pos = len(masked_tokens)
-    for token in masked_tokens:
+def gap_tokens(document, num_gapped_tokens, i, num_left_right_context):
+    def shift_to_full_word():
+        nonlocal document
+        nonlocal start_index
+        nonlocal end_index
+        while True:
+            if document[start_index].startswith('##'):
+                start_index -= 1
+            elif document[end_index].startswith('##'):
+                end_index += 1
+            else:
+                return start_index, end_index
+
+    logging.debug("Gapping tokens.")
+
+    if num_gapped_tokens == 0:
+        left_context = document[i - num_left_right_context: i]
+        right_context = document[i: i + num_left_right_context]
+        gapped_tokens = []
+    else:
+        is_even = num_gapped_tokens % 2
+        if is_even:
+            start_index = i - (num_gapped_tokens // 2)
+        else:
+            # in this case take the odd token is taken from the left side
+            start_index = i - (num_gapped_tokens // 2) - 1
+
+        end_index = i + (num_gapped_tokens // 2)
+        logging.debug("Starting shift.")
+        new_start_index, new_end_index = shift_to_full_word()
+        logging.debug("Shift finished.")
+
+        gapped_tokens = document[new_start_index: new_end_index]
+        left_context = document[new_start_index - num_left_right_context: new_start_index]
+        right_context = document[new_end_index: new_end_index + num_left_right_context]
+
+    return gapped_tokens, left_context, right_context
+
+
+def create_ordered_vocab_vec(gapped_tokens, tokenizer):
+    res = [0] * len(tokenizer.vocab)
+    pos = len(gapped_tokens)
+    for token in gapped_tokens:
         res[token] = pos
         pos -= 1
     return res
 
 
-def write_instance_to_example_files(instances,
-                                    tokenizer,
-                                    max_seq_length,
-                                    output_files):
+def write_instances(instances,
+                    tokenizer,
+                    max_seq_length,
+                    output_dir):
     writers = []
+    output_files = [f"data_chunk_{chunk}" for chunk in range(math.ceil(len(instances) / 10000))]
     for output_file in output_files:
-        writers.append(tf.io.TFRecordWriter(output_file))
+        writers.append(tf.io.TFRecordWriter(os.path.join(output_dir, output_file)))
 
     writer_index = 0
 
@@ -209,17 +255,16 @@ def write_instance_to_example_files(instances,
         assert len(input_ids) == max_seq_length
         assert len(distance_ids) == max_seq_length
 
-        num_masked_tokens = instance.num_masked_tokens
+        num_gapped_tokens = instance.num_gapped_tokens
 
-        masked_tokens = instance.masked_tokens
-        masked_tokens = tokenizer.convert_tokens_to_ids(masked_tokens)
-        masked_tokens = create_ordered_vocab_vec(masked_tokens, tokenizer)
+        gapped_tokens = tokenizer.convert_tokens_to_ids(instance.gapped_tokens)
+        gapped_tokens = create_ordered_vocab_vec(gapped_tokens, tokenizer)
 
         features = OrderedDict()
         features["input_ids"] = create_int_feature(input_ids)
         features["distance_ids"] = create_int_feature(distance_ids)
-        features["num_masked_tokens"] = create_int_feature(num_masked_tokens)
-        features["masked_tokens"] = create_int_feature(masked_tokens)
+        features["num_gapped_tokens"] = create_int_feature([num_gapped_tokens])
+        features["gapped_tokens"] = create_int_feature(gapped_tokens)
 
         tf_example = tf.train.Example(features=tf.train.Features(feature=features))
 
@@ -228,10 +273,9 @@ def write_instance_to_example_files(instances,
 
         total_written += 1
 
+        logging.debug(f"*** Writing Example {inst_index}***")
         if inst_index < 20:
-            logging.info("*** Example ***")
-            logging.info("tokens: %s" % " ".join(
-                [tokenizer.printable_text(x) for x in instance.tokens]))
+            logging.info("tokens: %s" % " ".join(instance.tokens))
 
             for feature_name in features.keys():
                 feature = features[feature_name]
@@ -254,14 +298,14 @@ def create_int_feature(values):
     return feature
 
 
-def create_float_feature(values):
-    feature = tf.train.Feature(float_list=tf.train.FloatList(value=list(values)))
-    return feature
-
-
-@dataclass
-class App:
-    """Create training instances for mulit-word-generator.
+def run(input_dir: str,
+        output_dir: str,
+        random_seed: int = 1234,
+        vocab_file: str = os.path.join(constants.LOCAL_FOLDER_BERT, "vocab.txt"),
+        max_seq_length: int = constants.MAX_SEQ_LENGTH,
+        max_gapped_tokens: int = 5,
+        dupe_factor: int = 2):
+    """Create training instances for multi-word-generator.
 
     :Arguments
         input_path: Path to the data folder that keeps the text in individual text files.
@@ -269,42 +313,47 @@ class App:
         random_seed: Random seed for the random number generator.
         vocab_file: Path to vocab file.
         max_seq_length: Maximal number of input sequence length.
-        max_masked_tokens: Maximal amount of tokens masked.
+        max_gapped_tokens: Desired amount of maximal tokens in a gap. In some fringe cases the effective
+                            amount of tokens in a gap might be slightly higher, due to word completion inside the gap.
         dupe_factor: Duplication factor of each document when generating training instances.
     """
-    input_path: str
-    output_path: str #TODO make this into output folder and auto-generate 300MB sized files (if necesarry)
-    random_seed: int = 1234
-    vocab_file: str = os.path.join(constants.LOCAL_FOLDER_BERT, "vocab.txt")
-    max_seq_length: int = 256
-    max_masked_tokens: int = 5
-    dupe_factor: int = 5
+    logger = logging.getLogger("")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(logging.StreamHandler(sys.stdout))
 
-    def run(self):
-        logging.info("App fired.")
-        tokenizer = bert.tokenization.FullTokenizer(
-            vocab_file=self.vocab_file,
-            do_lower_case=True)
+    pr = None
+    if PROFILING:
+        pr = cProfile.Profile()
+        pr.enable()
 
-        input_files = os.listdir(self.input_path)
+    logging.info("Application fired.")
+    tokenizer = bert.tokenization.FullTokenizer(
+        vocab_file=vocab_file,
+        do_lower_case=True)
 
-        logging.info("### Reading files from input ###")
-        for input_file in input_files:
-            logging.info(f'    {input_file}')
+    input_files = os.listdir(input_dir)
 
-        rng = random.Random(self.random_seed)
+    logging.info("### Reading files from input ###")
+    for input_file in input_files:
+        logging.info(f'    {input_file}')
 
-        instances = create_training_instances(
-            input_files, tokenizer, self.max_seq_length,
-            self.max_masked_tokens, self.dupe_factor,
-            rng)
+    rng = random.Random(random_seed)
 
-        logging.info("### Writing to output files ###")
-        logging.info(f'    {self.output_path}')
+    instances = create_training_instances(
+        input_dir, tokenizer, max_seq_length,
+        max_gapped_tokens, dupe_factor,
+        rng)
 
-        write_instance_to_example_files(
-            instances, tokenizer, self.max_seq_length, [self.output_path])
+    logging.info("### Writing to output files ###")
+    logging.info(f'    {output_dir}')
+
+    write_instances(instances, tokenizer, max_seq_length, output_dir)
+    logger.info("### Finished writing output to files ###")
+
+    if PROFILING:
+        pr.disable()
+        pr.print_stats(sort="calls")
 
 
 if __name__ == "__main__":
-    fire.Fire(App)
+    fire.Fire(run)

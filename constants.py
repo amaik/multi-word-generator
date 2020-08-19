@@ -7,8 +7,10 @@ HUB_URL_BERT = "https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/2"
 
 
 EPOCHS = 3
-BATCH_SIZE = 32
+TRAIN_BATCH_SIZE = 32
 EVAL_BATCH_SIZE = 32
+
+MAX_SEQ_LENGTH = 256
 
 BERT_CONFIG = r'''{
     "attention_probs_dropout_prob": 0.1,
