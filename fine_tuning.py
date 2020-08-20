@@ -7,9 +7,10 @@ import constants
 from model import multi_word_model, bert_config_from_file
 
 
-def load_record_data(input_dir="documents/processed",
-                     max_seq_length=256,
-                     vocab_size=30522):
+def load_record_data(input_dir,
+                     max_seq_length,
+                     vocab_size,
+                     batch_size):
     input_files = []
     for file in os.listdir(input_dir):
         input_files.append(os.path.join(input_dir, file))
@@ -36,6 +37,9 @@ def load_record_data(input_dir="documents/processed",
         # return input_ids, distance_ids, num_gapped_tokens, gapped_tokens
         return parsed_example
 
+    # TODO try this again with just tf.io.parse_example
+    # feature_tensors = tf.io.parse_example(example_batch, feature_specification)
+
     parsed_data = record_data.map(_parse_examples)
     parsed_data.batch(constants.TRAIN_BATCH_SIZE)
     print(dir(parsed_data.take(1)))
@@ -58,12 +62,19 @@ def train(input_dir,
     :param output_dir:
     :param bert_config_file:
     :param max_seq_length:
+    :param train_batch_size:
     :param hub_url_bert_encoder:
     :param hub_module_trainable:
     :param final_layer_initializer:
     :return:
     """
     bert_config = bert_config_from_file(bert_config_file)
+
+    data_set = load_record_data(input_dir,
+                                max_seq_length,
+                                bert_config.vocab_size,
+                                train_batch_size)
+
     model = multi_word_model(bert_config,
                              max_seq_length,
                              hub_url_bert_encoder,
@@ -86,3 +97,27 @@ def train(input_dir,
 
 if __name__ == "__main__":
     fire.Fire(load_record_data)
+
+    # TODO use tensorboard when training this
+
+    # Set up logging.
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    logdir = "logs/func/%s" % stamp
+    writer = tf.summary.create_file_writer(logdir)
+
+    # Create a new model to get a fresh trace
+    # Otherwise the summary will not see the graph.
+    new_model = MySequentialModule()
+
+    # Bracket the function call with
+    # tf.summary.trace_on() and tf.summary.trace_export().
+    tf.summary.trace_on(graph=True, profiler=True)
+    # Call only one tf.function when tracing.
+    z = print(new_model(tf.constant([[2.0, 2.0, 2.0]])))
+    with writer.as_default():
+        tf.summary.trace_export(
+            name="my_func_trace",
+            step=0,
+            profiler_outdir=logdir)
+
+    % tensorboard - -logdir logs/func
