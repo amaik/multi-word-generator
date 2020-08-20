@@ -14,12 +14,13 @@ import numpy as np
 import tensorflow as tf
 from official.nlp import bert
 from official.nlp.bert import tokenization
+from tqdm import tqdm
 
 # local imports
 import constants
 
-DEBUG = True
-PROFILING = True
+DEBUG = None
+PROFILING = None
 
 
 @dataclass
@@ -240,7 +241,7 @@ def write_instances(instances,
     writer_index = 0
 
     total_written = 0
-    for (inst_index, instance) in enumerate(instances):
+    for (inst_index, instance) in enumerate(tqdm(instances)):
         input_ids = tokenizer.convert_tokens_to_ids(instance.tokens)
         distance_ids = instance.distance_ids
         assert len(input_ids) == max_seq_length
@@ -261,11 +262,21 @@ def write_instances(instances,
         gapped_tokens = tokenizer.convert_tokens_to_ids(instance.gapped_tokens)
         gapped_tokens = _create_ordered_vocab_vec()
 
+        input_mask = np.zeros_like(input_ids)
+        input_mask[np.where(np.array(input_ids) != 0)] = 1
+        input_type_ids = np.zeros_like(input_ids)
+
+        def _create_int_feature(values):
+            return tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
+
+        # TODO describe the variables
         features = OrderedDict()
-        features["input_ids"] = create_int_feature(input_ids)
-        features["distance_ids"] = create_int_feature(distance_ids)
-        features["num_gapped_tokens"] = create_int_feature([num_gapped_tokens])
-        features["gapped_tokens"] = create_int_feature(gapped_tokens)
+        features["input_ids"] = _create_int_feature(input_ids)
+        features["input_mask"] = _create_int_feature(input_mask)
+        features["input_type_ids"] = _create_int_feature(input_type_ids)
+        features["input_distance_ids"] = _create_int_feature(distance_ids)
+        features["output_num_gapped"] = _create_int_feature([num_gapped_tokens])
+        features["output_order"] = _create_int_feature(gapped_tokens)
 
         tf_example = tf.train.Example(features=tf.train.Features(feature=features))
 
@@ -274,8 +285,9 @@ def write_instances(instances,
 
         total_written += 1
 
-        logging.debug(f"*** Writing Example {inst_index}***")
-        if inst_index < 20:
+
+        if DEBUG and inst_index < 20:
+            logging.debug(f"*** Writing Example {inst_index}***")
             logging.info("tokens: %s" % " ".join(instance.tokens))
 
             for feature_name in features.keys():
@@ -294,18 +306,15 @@ def write_instances(instances,
     logging.info("Wrote %d total instances", total_written)
 
 
-def create_int_feature(values):
-    feature = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
-    return feature
-
-
 def run(input_dir: str,
         output_dir: str,
         random_seed: int = 1234,
         vocab_file: str = os.path.join(constants.LOCAL_FOLDER_BERT, "vocab.txt"),
         max_seq_length: int = constants.MAX_SEQ_LENGTH,
         max_gapped_tokens: int = 5,
-        dupe_factor: int = 2):
+        dupe_factor: int = 2,
+        debug: bool = False,
+        profiling: bool = False):
     """Create training instances for multi-word-generator.
 
     :Arguments
@@ -319,8 +328,13 @@ def run(input_dir: str,
         dupe_factor: Duplication factor of each document when generating training instances.
     """
     logger = logging.getLogger("")
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     logger.addHandler(logging.StreamHandler(sys.stdout))
+
+    global DEBUG
+    global PROFILING
+    DEBUG = debug
+    PROFILING = profiling
 
     pr = None
     if PROFILING:
