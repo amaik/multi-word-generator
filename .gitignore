@@ -132,3 +132,6 @@ dmypy.json
 .idea/*
 
 model.png
+
+# data
+documents/*
