@@ -7,11 +7,41 @@ import constants
 from model import multi_word_model, bert_config_from_file
 
 
-def input_generator():
-    """
-    TODO Write an input generator
-    :return:
-    """
+def load_record_data(input_dir="documents/processed",
+                     max_seq_length=256,
+                     vocab_size=30522):
+    input_files = []
+    for file in os.listdir(input_dir):
+        input_files.append(os.path.join(input_dir, file))
+
+    record_data = tf.data.TFRecordDataset(filenames=input_files)
+
+    def _parse_examples(example):
+        feature_description = {
+            'input_ids': tf.io.FixedLenFeature([max_seq_length], tf.int64),
+            'input_mask': tf.io.FixedLenFeature([max_seq_length], tf.int64),
+            'input_type_ids': tf.io.FixedLenFeature([max_seq_length], tf.int64),
+            'input_distance_ids': tf.io.FixedLenFeature([max_seq_length], tf.int64),
+            'output_num_gapped': tf.io.FixedLenFeature([1], tf.int64),
+            'output_order': tf.io.FixedLenFeature([vocab_size], tf.int64)
+        }
+
+        parsed_example = tf.io.parse_single_example(example, feature_description)
+
+        # input_ids = parsed_example['input_ids']
+        # distance_ids = parsed_example['distance_ids']
+        # num_gapped_tokens = parsed_example['num_gapped_tokens']
+        # gapped_tokens = parsed_example['gapped_tokens']
+        #
+        # return input_ids, distance_ids, num_gapped_tokens, gapped_tokens
+        return parsed_example
+
+    parsed_data = record_data.map(_parse_examples)
+    parsed_data.batch(constants.TRAIN_BATCH_SIZE)
+    print(dir(parsed_data.take(1)))
+    print(parsed_data.element_spec)
+
+    return parsed_data
 
 
 def train(input_dir,
@@ -40,36 +70,19 @@ def train(input_dir,
                              hub_module_trainable,
                              final_layer_initializer)
 
-
     model.compile(optimizer=tf.keras.optimizers.Adam,
                   loss={
                       'output_num_words': tf.keras.losses.mse,
                       'output_order_words': tf.keras.losses.mse
+                  },
+                  metrics={
+                      'output_num_words': tf.keras.metrics.mae,
+                      'output_order_words': tf.keras.metrics.mae
                   })
+
+    # TODO fit the model
+    model.fit_generator()
 
 
 if __name__ == "__main__":
-    fire.Fire(train)
-
-train_data_size = len(glue_train_labels)
-steps_per_epoch = int(train_data_size / constants.BATCH_SIZE)
-num_train_steps = steps_per_epoch * constants.EPOCHS
-warmup_steps = int(constants.EPOCHS * train_data_size * 0.1 / constants.BATCH_SIZE)
-
-# creates an optimizer with learning rate schedule
-optimizer = nlp.optimization.create_optimizer(
-    2e-5, num_train_steps=num_train_steps, num_warmup_steps=warmup_steps)
-
-metrics = [tf.keras.metrics.SparseCategoricalAccuracy('accuracy', dtype=tf.float32)]
-loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-
-bert_classifier.compile(
-    optimizer=optimizer,
-    loss=loss,
-    metrics=metrics)
-
-bert_classifier.fit(
-    glue_train, glue_train_labels,
-    validation_data=(glue_validation, glue_validation_labels),
-    batch_size=32,
-    epochs=epochs)
+    fire.Fire(load_record_data)
