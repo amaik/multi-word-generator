@@ -55,13 +55,13 @@ def multi_word_model(bert_config,
 
     return tf.keras.Model(
         inputs={
-            'input_word_ids': input_word_ids,
+            'input_ids': input_word_ids,
             'input_mask': input_mask,
             'input_type_ids': input_type_ids
         },
         outputs={
-            'output_num_words': pooled_out,
-            'output_order_words': seq_out
+            'output_num_gapped': pooled_out,
+            'output_order': seq_out
         })
 
 
