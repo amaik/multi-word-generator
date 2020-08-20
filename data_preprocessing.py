@@ -228,15 +228,6 @@ def gap_tokens(document, num_gapped_tokens, i, num_left_right_context):
     return gapped_tokens, left_context, right_context
 
 
-def create_ordered_vocab_vec(gapped_tokens, tokenizer):
-    res = [0] * len(tokenizer.vocab)
-    pos = len(gapped_tokens)
-    for token in gapped_tokens:
-        res[token] = pos
-        pos -= 1
-    return res
-
-
 def write_instances(instances,
                     tokenizer,
                     max_seq_length,
@@ -257,8 +248,18 @@ def write_instances(instances,
 
         num_gapped_tokens = instance.num_gapped_tokens
 
+        def _create_ordered_vocab_vec():
+            nonlocal gapped_tokens
+            nonlocal tokenizer
+            res = [0] * len(tokenizer.vocab)
+            pos = len(gapped_tokens)
+            for token in gapped_tokens:
+                res[token] = pos
+                pos -= 1
+            return res
+
         gapped_tokens = tokenizer.convert_tokens_to_ids(instance.gapped_tokens)
-        gapped_tokens = create_ordered_vocab_vec(gapped_tokens, tokenizer)
+        gapped_tokens = _create_ordered_vocab_vec()
 
         features = OrderedDict()
         features["input_ids"] = create_int_feature(input_ids)
