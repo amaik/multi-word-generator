@@ -117,7 +117,7 @@ def create_instances_from_document(document,
         2 and 0.1 * max_seq_length.
     """
 
-    def random_num_gapped_tokens():
+    def _random_num_gapped_tokens():
         nonlocal rng
         nonlocal max_gapped_tokens
         if rng.random() < 0.05:
@@ -150,7 +150,7 @@ def create_instances_from_document(document,
             else:
                 num_left_right_context = rng.randint(2, (max_seq_length - 2) // 10)
 
-            desired_num_gapped_tokens = random_num_gapped_tokens()
+            desired_num_gapped_tokens = _random_num_gapped_tokens()
             gapped_tokens, left_context, right_context = gap_tokens(document,
                                                                     desired_num_gapped_tokens,
                                                                     i,
@@ -190,7 +190,7 @@ def create_instances_from_document(document,
 
 
 def gap_tokens(document, num_gapped_tokens, i, num_left_right_context):
-    def shift_to_full_word():
+    def _shift_to_full_word():
         nonlocal document
         nonlocal start_index
         nonlocal end_index
@@ -218,7 +218,7 @@ def gap_tokens(document, num_gapped_tokens, i, num_left_right_context):
 
         end_index = i + (num_gapped_tokens // 2)
         logging.debug("Starting shift.")
-        new_start_index, new_end_index = shift_to_full_word()
+        new_start_index, new_end_index = _shift_to_full_word()
         logging.debug("Shift finished.")
 
         gapped_tokens = document[new_start_index: new_end_index]
