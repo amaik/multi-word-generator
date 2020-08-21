@@ -3,6 +3,7 @@ import os
 
 import fire
 import official.nlp.bert.configs
+import numpy as np
 import tensorflow as tf
 import tensorflow_hub as hub
 from official.nlp import bert
@@ -18,6 +19,10 @@ def bert_config_from_file(bert_config_file):
     config_dict = json.loads(open(bert_config_file, "r+").read())
     bert_config = bert.configs.BertConfig.from_dict(config_dict)
     return bert_config
+
+
+def gelu(x):
+    return 0.5 * x * (1 + tf.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3))))
 
 
 def multi_word_model(bert_config,
@@ -42,7 +47,7 @@ def multi_word_model(bert_config,
     pooled_out, seq_out = bert_model([input_word_ids, input_mask, input_type_ids])
 
     pooled_out = tf.keras.layers.Dropout(rate=bert_config.hidden_dropout_prob)(pooled_out)
-    pooled_out = tf.keras.layers.Dense(bert_config.hidden, activation="gelu")(pooled_out)
+    pooled_out = tf.keras.layers.Dense(bert_config.hidden_size, activation=gelu)(pooled_out)
     pooled_out = tf.keras.layers.Dense(1, kernel_initializer=initializer, name="output_num_words")(
         pooled_out)  # indicate the number of words to generate
 
