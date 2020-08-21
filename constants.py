@@ -12,7 +12,7 @@ EVAL_BATCH_SIZE = 32
 
 MAX_SEQ_LENGTH = 256
 
-BERT_CONFIG = r'''{
+BERT_CONFIG = {
     "attention_probs_dropout_prob": 0.1,
     "hidden_act": "gelu",
     "hidden_dropout_prob": 0.1,
@@ -24,4 +24,4 @@ BERT_CONFIG = r'''{
     "num_hidden_layers": 12,
     "type_vocab_size": 2,
     "vocab_size": 30522
-}'''
+}
